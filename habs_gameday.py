@@ -138,6 +138,64 @@ def result(g):
     return code, h, o, extra
 
 
+def txt(v):
+    return v.get("default", "") if isinstance(v, dict) else str(v or "")
+
+
+def period_label(pd):
+    n, t = pd.get("number", 0), pd.get("periodType", "REG")
+    if t == "OT":
+        return "OT" if n <= 4 else f"{n - 3}OT"
+    return {1: "1st", 2: "2nd", 3: "3rd"}.get(n, f"P{n}")
+
+
+def game_detail(g):
+    """Scoring, goalies and team stats for one finished game."""
+    gid = g["id"]
+    age = (dt.date.today() - dt.date.fromisoformat(g["gameDate"])).days
+    ttl = FOREVER if age > 7 else LIVE_TTL   # the NHL can correct recent scoring
+    land = get(f"gamecenter/{gid}/landing", ttl) or {}
+    box = get(f"gamecenter/{gid}/boxscore", ttl) or {}
+    rail = get(f"gamecenter/{gid}/right-rail", ttl) or {}
+    home, away = g["homeTeam"]["abbrev"], g["awayTeam"]["abbrev"]
+    summ = land.get("summary") or {}
+
+    goals, score, lead = [], {home: 0, away: 0}, {home: 0, away: 0}
+    for per in summ.get("scoring", []):
+        label = period_label(per.get("periodDescriptor", {}))
+        for gl in per.get("goals", []):
+            team = txt(gl.get("teamAbbrev"))
+            if team not in score:
+                team = home if gl.get("isHome") else away
+            other = away if team == home else home
+            score[team] += 1
+            lead[team] = max(lead[team], score[team] - score[other])
+            name = txt(gl.get("name")) or f'{txt(gl.get("firstName"))} {txt(gl.get("lastName"))}'.strip()
+            assists = [txt(a.get("name")) or f'{txt(a.get("firstName"))} {txt(a.get("lastName"))}'.strip()
+                       for a in gl.get("assists", [])]
+            tags = []
+            if (gl.get("strength") or "").lower() in ("pp", "sh"):
+                tags.append(gl["strength"].upper())
+            if "empty" in (gl.get("goalModifier") or ""):
+                tags.append("EN")
+            goals.append({"period": label, "time": gl.get("timeInPeriod", ""), "team": team,
+                          "name": name, "n": gl.get("goalsToDate"), "assists": assists, "tags": tags})
+
+    goalies = []
+    pbg = box.get("playerByGameStats") or {}
+    for side, abbr in (("awayTeam", away), ("homeTeam", home)):
+        for gk in (pbg.get(side) or {}).get("goalies", []):
+            if gk.get("toi") in ("00:00", "0:00"):
+                continue
+            goalies.append({"team": abbr, "name": txt(gk.get("name")), "sv": gk.get("saveShotsAgainst", ""),
+                            "pct": gk.get("savePctg"), "dec": gk.get("decision", "")})
+
+    raw = rail.get("teamGameStats") or (box.get("summary") or {}).get("teamGameStats") or []
+    stats = {s.get("category"): (s.get("homeValue"), s.get("awayValue")) for s in raw}
+    return {"goals": goals, "goalies": goalies, "stats": stats, "lead": lead,
+            "home": home, "away": away, "shootout": bool(summ.get("shootout"))}
+
+
 def analyze(player, vs_set, season):
     """Returns career line vs the opponent set, plus current-season form."""
     pid = player["id"]
@@ -208,28 +266,37 @@ CSS = """
 --red:#FF3B30;--orange:#FF9500;color-scheme:light dark}
 @media (prefers-color-scheme:dark){:root{--bg:#000;--card:#1C1C1E;--l1:#FFF;
 --l2:rgba(235,235,245,.6);--l3:rgba(235,235,245,.3);--sep:rgba(84,84,88,.6);
---fill:rgba(118,118,128,.24);--accent:#FF4D5E;--green:#30D158;--red:#FF453A;--orange:#FF9F0A}}
+--fill:rgba(118,118,128,.24);--accent:#E0384B;--green:#30D158;--red:#FF453A;--orange:#FF9F0A}}
 *{box-sizing:border-box;margin:0}
 body{background:var(--bg);color:var(--l1);font:17px/1.29 -apple-system,BlinkMacSystemFont,
 "SF Pro Text","Helvetica Neue",Arial,sans-serif;-webkit-font-smoothing:antialiased;
 padding:env(safe-area-inset-top,0) 0 env(safe-area-inset-bottom,0)}
-main{max-width:1120px;margin:0 auto;padding:24px 16px 48px}
+main{max-width:1240px;margin:0 auto;padding:24px 16px 48px}
 .hero{display:flex;align-items:center;gap:16px;flex-wrap:wrap;margin-bottom:28px}
 .logos{display:flex;align-items:center;gap:6px}.logos img{width:64px;height:64px}
 .logos span{color:var(--l2);font-size:15px}
 h1{font-size:34px;line-height:41px;font-weight:700;letter-spacing:.37px}
 .sub{color:var(--l2);font-size:15px;margin-top:2px}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:24px 20px;align-items:start}
+/* Phone: one column, hot players first. Desktop: games left, players right. */
+.layout{display:grid;gap:28px}
+.side{display:contents}
+.hot{order:1}.games{order:2}.lead1{order:3}.lead2{order:4}
+@media (min-width:900px){
+ main{padding:40px 32px 64px}
+ .hero{margin-bottom:36px}.logos img{width:80px;height:80px}
+ .layout{grid-template-columns:minmax(0,7fr) minmax(0,5fr);gap:32px;align-items:start}
+ .games{order:1}.side{display:grid;gap:28px;order:2}
+}
 h2{font-size:20px;line-height:25px;font-weight:600;margin:0 4px 4px}
 .note{color:var(--l2);font-size:13px;margin:0 4px 8px}
 .group{background:var(--card);border-radius:10px;overflow:hidden}
-.row{display:flex;align-items:center;gap:12px;min-height:44px;padding:8px 16px;position:relative}
-.row+.row::before{content:"";position:absolute;top:0;left:16px;right:0;height:.5px;background:var(--sep)}
-.row.ph+.row::before,.row+.row.ph::before{left:68px}
-.grow{flex:1;min-width:0}.name{font-weight:400;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.group>*{position:relative}
+.group>*+*::before{content:"";position:absolute;top:0;left:16px;right:0;height:.5px;background:var(--sep)}
+.group>.ph+.ph::before{left:68px}
+.row{display:flex;align-items:center;gap:12px;min-height:44px;padding:8px 16px}
+.grow{flex:1;min-width:0}.name{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .meta{color:var(--l2);font-size:13px}
 .shot{width:40px;height:40px;border-radius:50%;background:var(--fill);object-fit:cover;flex:none}
-.num{font-variant-numeric:tabular-nums}
 .stats{display:grid;grid-template-columns:repeat(4,32px);text-align:right;gap:4px;font-variant-numeric:tabular-nums}
 .stats.head{color:var(--l2);font-size:12px;padding:6px 16px 0;justify-content:end}
 .stats b{font-weight:600}
@@ -241,6 +308,32 @@ h2{font-size:20px;line-height:25px;font-weight:600;margin:0 4px 4px}
 .dot.on{background:var(--accent);border-color:var(--accent)}
 .badge{color:var(--accent);font-weight:600;font-size:15px;text-align:right;white-space:nowrap}
 .empty{padding:14px 16px;color:var(--l2);font-size:15px}
+/* Expandable game rows */
+summary{list-style:none;cursor:pointer;-webkit-tap-highlight-color:transparent}
+summary::-webkit-details-marker{display:none}
+summary:focus-visible{outline:2px solid var(--accent);outline-offset:-2px;border-radius:10px}
+@media (hover:hover){summary:hover{background:var(--fill)}}
+.chev{width:8px;height:13px;color:var(--l3);flex:none;transition:transform .2s ease}
+details[open] .chev{transform:rotate(90deg)}
+@media (prefers-reduced-motion:reduce){.chev{transition:none}}
+.detail{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:8px 28px;padding:0 16px 16px}
+.detail h3{font-size:15px;font-weight:600;margin:12px 0 4px}
+.per{font-size:13px;color:var(--l2);margin:8px 0 2px}
+.gl{display:flex;gap:10px;padding:3px 0;font-size:15px;align-items:baseline}
+.gl .t{width:40px;color:var(--l2);font-variant-numeric:tabular-nums;flex:none;font-size:13px}
+.tm{font-size:11px;font-weight:600;border-radius:4px;padding:1px 5px;background:var(--fill);flex:none}
+.tm.h{background:var(--accent);color:#FFF}
+.tag{font-size:11px;font-weight:600;color:var(--accent);margin-left:6px}
+.dec{font-size:12px;font-weight:600;color:var(--l2);margin-left:6px}
+.sh{display:grid;grid-template-columns:52px 1fr 52px;font-size:13px;font-weight:600;padding:4px 0}
+.sh span{text-align:center}.sh b:last-child{text-align:right}
+.srow{display:grid;grid-template-columns:52px 1fr 52px;align-items:center;min-height:30px;
+border-top:.5px solid var(--sep);font-size:15px;font-variant-numeric:tabular-nums}
+.srow .lbl{text-align:center;color:var(--l2);font-size:13px}
+.v{justify-self:start;min-width:30px;text-align:center;padding:1px 7px;border-radius:999px}
+.v:last-child{justify-self:end}
+.v.hb{background:var(--accent);color:#FFF;font-weight:600}
+.v.ob{background:var(--l1);color:var(--card);font-weight:600}
 footer{color:var(--l2);font-size:12px;margin-top:32px;line-height:1.5}
 """
 
@@ -257,17 +350,116 @@ def player_row(r, right):
             f'<div class="meta">#{E(str(r["num"]))} · {E(r["pos"])}</div></div>{right}</div>')
 
 
-def leader_section(title, note, rows):
+# (category, label, +1 = higher is better, -1 = lower is better)
+STAT_ROWS = [("sog", "Shots", 1), ("faceoffWinningPctg", "Faceoff %", 1),
+             ("powerPlayPctg", "Power play %", 1), ("ppOpps", "Power play opps", 1),
+             ("pim", "Penalty minutes", -1), ("hits", "Hits", 1), ("blockedShots", "Blocked shots", 1),
+             ("takeaways", "Takeaways", 1), ("giveaways", "Giveaways", -1), ("lead", "Biggest lead", 1)]
+
+
+def stat_value(cat, stats, side, lead, team):
+    """Returns (number for comparison, display text) for one team."""
+    i = 0 if side == "home" else 1
+    pp = str((stats.get("powerPlay") or (None, None))[i] or "")
+    if cat == "lead":
+        x = lead.get(team, 0)
+        return x, str(x)
+    if cat == "ppOpps":
+        if "/" not in pp:
+            return None, "–"
+        x = int(pp.split("/")[1])
+        return x, str(x)
+    v = (stats.get(cat) or (None, None))[i]
+    if v is None and cat == "powerPlayPctg" and "/" in pp:
+        g, o = (int(n) for n in pp.split("/"))
+        v = g / o if o else 0
+    if v is None:
+        return None, "–"
+    try:
+        x = float(v)
+    except (TypeError, ValueError):
+        return None, str(v)
+    if cat in ("faceoffWinningPctg", "powerPlayPctg"):
+        x = x * 100 if x <= 1 else x
+        return x, f"{x:.1f}"
+    return x, str(int(x)) if x == int(x) else f"{x:g}"
+
+
+def detail_html(d, opp_code):
+    habs_home = d["home"] == HABS
+    opp_team = d["away"] if habs_home else d["home"]
+
+    # Scoring, grouped by period
+    sc, last_per = [], None
+    for gl in d["goals"]:
+        if gl["period"] != last_per:
+            sc.append(f'<div class="per">{E(gl["period"])}</div>')
+            last_per = gl["period"]
+        n = f' ({gl["n"]})' if gl["n"] else ""
+        tags = "".join(f'<span class="tag">{t}</span>' for t in gl["tags"])
+        ast = ", ".join(E(a) for a in gl["assists"]) or "Unassisted"
+        cls = " h" if gl["team"] == HABS else ""
+        sc.append(f'<div class="gl"><span class="t">{E(gl["time"])}</span><span class="tm{cls}">{E(gl["team"])}</span>'
+                  f'<div><div>{E(gl["name"])}{n}{tags}</div><div class="meta">{ast}</div></div></div>')
+    if not sc:
+        sc.append('<p class="meta">No goals in regulation or overtime.</p>' if d["stats"] or d["goalies"]
+                  else '<p class="meta">Scoring data is not available for this game.</p>')
+    if d["shootout"]:
+        sc.append('<p class="meta" style="margin-top:6px">Decided by shootout.</p>')
+
+    # Goalies
+    gk = []
+    for g in d["goalies"]:
+        sv = str(g["sv"])
+        line = f"{sv.split('/')[0]} saves on {sv.split('/')[1]}" if "/" in sv else sv
+        if isinstance(g["pct"], (int, float)):
+            line += " · " + f"{g['pct']:.3f}".lstrip("0")
+        dec = f'<span class="dec">{E(g["dec"])}</span>' if g["dec"] else ""
+        cls = " h" if g["team"] == HABS else ""
+        gk.append(f'<div class="gl"><span class="tm{cls}">{E(g["team"])}</span>'
+                  f'<div><div>{E(g["name"])}{dec}</div><div class="meta">{E(line)}</div></div></div>')
+    gk_html = "".join(gk) or '<p class="meta">Goalie data is not available.</p>'
+
+    # Team stats, Habs always on the left
+    hs, os_ = ("home", "away") if habs_home else ("away", "home")
+    rows = []
+    for cat, label, sign in STAT_ROWS:
+        if cat not in ("lead", "ppOpps", "powerPlayPctg") and cat not in d["stats"]:
+            continue
+        hx, ht = stat_value(cat, d["stats"], hs, d["lead"], HABS)
+        ox, ot = stat_value(cat, d["stats"], os_, d["lead"], opp_team)
+        if hx is None and ox is None:
+            continue
+        hc = oc = ""
+        if hx is not None and ox is not None and hx != ox:
+            if (hx - ox) * sign > 0:
+                hc = " hb"
+            else:
+                oc = " ob"
+        rows.append(f'<div class="srow"><span class="v{hc}">{ht}</span><span class="lbl">{label}</span>'
+                    f'<span class="v{oc}">{ot}</span></div>')
+    st_html = (f'<div class="sh"><b>{HABS}</b><span>Team stats</span><b>{E(opp_team)}</b></div>' + "".join(rows)
+               if rows else '<p class="meta">Team stats are not available.</p>')
+
+    return (f'<div class="detail"><div><h3>Scoring</h3>{"".join(sc)}</div>'
+            f'<div><h3>Goalies</h3>{gk_html}<div style="margin-top:14px">{st_html}</div></div></div>')
+
+
+CHEVRON = ('<svg class="chev" viewBox="0 0 8 13" aria-hidden="true"><path d="M1.5 1.5 6.5 6.5 1.5 11.5" '
+           'fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>')
+
+
+def leader_section(title, note, rows, cls=""):
     if not rows:
         body = '<div class="empty">No points recorded in this matchup.</div>'
     else:
         head = '<div class="stats head"><span>GP</span><span>G</span><span>A</span><span>P</span></div>'
         body = head + "".join(player_row(r, f'<div class="stats"><span>{r["gp"]}</span><span>{r["g"]}</span>'
                                             f'<span>{r["a"]}</span><b>{r["p"]}</b></div>') for r in rows)
-    return f'<section><h2>{E(title)}</h2><p class="note">{E(note)}</p><div class="group">{body}</div></section>'
+    return f'<section class="{cls}"><h2>{E(title)}</h2><p class="note">{E(note)}</p><div class="group">{body}</div></section>'
 
 
-def render(game, opp, h2h, habs_lead, opp_lead, hot_rows, habs_gp):
+def render(game, opp, h2h, details, habs_lead, opp_lead, hot_rows, habs_gp):
     if game:
         start = dt.datetime.fromisoformat(game["startTimeUTC"].replace("Z", "+00:00")).astimezone(LOCAL_TZ)
         home = game["homeTeam"]["abbrev"] == HABS
@@ -292,11 +484,13 @@ def render(game, opp, h2h, habs_lead, opp_lead, hot_rows, habs_gp):
         d = dt.date.fromisoformat(g["gameDate"]).strftime("%b %-d, %Y")
         where = "vs" if g["homeTeam"]["abbrev"] == HABS else "at"
         po = " · Playoffs" if g["gameType"] == 3 else ""
-        rows.append(f'<div class="row"><span class="pill {code}">{code}</span><div class="grow">'
+        body = detail_html(details[g["id"]], opp["abbrev"]) if g["id"] in details else \
+            '<div class="detail"><p class="meta">Game details are not available.</p></div>'
+        rows.append(f'<details><summary class="row"><span class="pill {code}">{code}</span><div class="grow">'
                     f'<div class="name">{where} {E(opp_side(g)["abbrev"])}</div><div class="meta">{d}{po}</div></div>'
-                    f'<span class="score">{h}–{o}{(" " + extra) if extra else ""}</span></div>')
+                    f'<span class="score">{h}–{o}{(" " + extra) if extra else ""}</span>{CHEVRON}</summary>{body}</details>')
     h2h_html = "".join(rows) or '<div class="empty">No completed games found.</div>'
-    h2h_note = f"Habs record: {w}–{l}–{otl}" if h2h else "No history in the lookback window."
+    h2h_note = f"Habs record: {w}–{l}–{otl}. Select a game to see the summary." if h2h else "No history in the lookback window."
 
     # Hot players
     if hot_rows:
@@ -320,11 +514,13 @@ def render(game, opp, h2h, habs_lead, opp_lead, hot_rows, habs_gp):
 <title>{E(title)}</title><style>{CSS}</style></head><body><main>
 <header class="hero"><div class="logos">{logo(habs_t)}<span>vs</span>{logo(opp)}</div>
 <div><h1>{E(title)}</h1><p class="sub">{E(sub)}</p></div></header>
-<div class="grid">
-<section><h2>Hot Habs</h2><p class="note">{E(hot_note)}</p><div class="group">{hot_html}</div></section>
-<section><h2>Last {len(h2h)} meetings</h2><p class="note">{E(h2h_note)}</p><div class="group">{h2h_html}</div></section>
-{leader_section(f"Habs who produce against {opp['abbrev']}", "Active Habs skaters. Career totals vs this opponent, regular season and playoffs, with any team.", habs_lead)}
-{leader_section(f"{opp['abbrev']} players who produce against the Habs", "Active opponent skaters. Career totals vs Montreal, regular season and playoffs, with any team.", opp_lead)}
+<div class="layout">
+<section class="games"><h2>Last {len(h2h)} meetings</h2><p class="note">{E(h2h_note)}</p><div class="group">{h2h_html}</div></section>
+<div class="side">
+<section class="hot"><h2>Hot Habs</h2><p class="note">{E(hot_note)}</p><div class="group">{hot_html}</div></section>
+{leader_section(f"Habs who produce against {opp['abbrev']}", "Active Habs skaters. Career totals vs this opponent, regular season and playoffs, with any team.", habs_lead, "lead1")}
+{leader_section(f"{opp['abbrev']} players who produce against the Habs", "Active opponent skaters. Career totals vs Montreal, regular season and playoffs, with any team.", opp_lead, "lead2")}
+</div>
 </div>
 <footer>Data: NHL web API (api-web.nhle.com), the source behind nhl.com. Generated {gen}.
 Skaters only. "Active" means the current NHL roster, so players on injured reserve can be missing.</footer>
@@ -354,11 +550,19 @@ def main():
     print(f"Season {season}: Habs vs {opp_code}", file=sys.stderr)
 
     h2h = head_to_head(opp_code, season)
+    details = {}
+    with cf.ThreadPoolExecutor(WORKERS) as ex:
+        futs = {ex.submit(game_detail, g): g["id"] for g in h2h}
+        for f in cf.as_completed(futs):
+            try:
+                details[futs[f]] = f.result()
+            except Exception as e:
+                print(f"  skipped game {futs[f]} details: {e}", file=sys.stderr)
     habs_rows = run_all(skaters(HABS), aliases(opp_code), season, "Habs")
     opp_rows = run_all(skaters(opp_code), {HABS}, season, opp_code)
     habs_gp = max((len(r["last"]) for r in habs_rows), default=0)
 
-    page = render(game, opp, h2h, leaders(habs_rows), leaders(opp_rows), hot(habs_rows), habs_gp)
+    page = render(game, opp, h2h, details, leaders(habs_rows), leaders(opp_rows), hot(habs_rows), habs_gp)
     with open(args.out, "w", encoding="utf-8") as f:
         f.write(page)
     print(f"Wrote {os.path.abspath(args.out)}", file=sys.stderr)
