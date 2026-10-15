@@ -278,10 +278,10 @@ main{max-width:1240px;margin:0 auto;padding:24px 16px 48px}
 .logos span{color:var(--l2);font-size:15px}
 h1{font-size:34px;line-height:41px;font-weight:700;letter-spacing:.37px}
 .sub{color:var(--l2);font-size:15px;margin-top:2px}
-/* Phone: one column, hot players first. Desktop: games left, players right. */
+/* Phone: one column, calendar first. Desktop: games left, players right. */
 .layout{display:grid;gap:28px}
 .side,.primary{display:contents}
-.hot{order:1}.games{order:2}.calsec{order:3}.lead1{order:4}.lead2{order:5}
+.calsec{order:1}.hot{order:2}.games{order:3}.lead1{order:4}.lead2{order:5}
 @media (min-width:900px){
  main{padding:40px 32px 64px}
  .hero{margin-bottom:36px}.logos img{width:80px;height:80px}
@@ -657,8 +657,8 @@ def render(game, opp, h2h, details, habs_lead, opp_lead, hot_rows, habs_gp, cal=
 <div><h1>{E(title)}</h1><p class="sub">{E(sub)}</p></div></header>
 <div class="layout">
 <div class="primary">
-<section class="games"><h2>Last {len(h2h)} meetings</h2><p class="note">{E(h2h_note)}</p><div class="group">{h2h_html}</div></section>
 {cal[0]}
+<section class="games"><h2>Last {len(h2h)} meetings</h2><p class="note">{E(h2h_note)}</p><div class="group">{h2h_html}</div></section>
 </div>
 <div class="side">
 <section class="hot"><h2>Hot Habs</h2><p class="note">{E(hot_note)}</p><div class="group">{hot_html}</div></section>
