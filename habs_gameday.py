@@ -10,6 +10,7 @@ Usage:
     python3 habs_gameday.py --refresh        # ignore cached current-season data
 """
 import argparse
+import calendar
 import concurrent.futures as cf
 import datetime as dt
 import hashlib
@@ -279,13 +280,13 @@ h1{font-size:34px;line-height:41px;font-weight:700;letter-spacing:.37px}
 .sub{color:var(--l2);font-size:15px;margin-top:2px}
 /* Phone: one column, hot players first. Desktop: games left, players right. */
 .layout{display:grid;gap:28px}
-.side{display:contents}
-.hot{order:1}.games{order:2}.lead1{order:3}.lead2{order:4}
+.side,.primary{display:contents}
+.hot{order:1}.games{order:2}.calsec{order:3}.lead1{order:4}.lead2{order:5}
 @media (min-width:900px){
  main{padding:40px 32px 64px}
  .hero{margin-bottom:36px}.logos img{width:80px;height:80px}
  .layout{grid-template-columns:minmax(0,7fr) minmax(0,5fr);gap:32px;align-items:start}
- .games{order:1}.side{display:grid;gap:28px;order:2}
+ .primary{display:grid;gap:28px;order:1}.side{display:grid;gap:28px;order:2}
 }
 h2{font-size:20px;line-height:25px;font-weight:600;margin:0 4px 4px}
 .note{color:var(--l2);font-size:13px;margin:0 4px 8px}
@@ -335,6 +336,41 @@ border-top:.5px solid var(--sep);font-size:15px;font-variant-numeric:tabular-num
 .v.hb{background:var(--accent);color:#FFF;font-weight:600}
 .v.ob{background:var(--l1);color:var(--card);font-weight:600}
 footer{color:var(--l2);font-size:12px;margin-top:32px;line-height:1.5}
+/* Calendar. Text colors use the iOS accessible variants for contrast. */
+:root{--tg:#248A3D;--tr:#D70015;--to:#C93400}
+@media (prefers-color-scheme:dark){:root{--tg:#30DB5B;--tr:#FF6961;--to:#FFB340}}
+.cal{background:var(--card);border-radius:10px;padding:4px 8px 10px}
+.calhead{display:flex;align-items:center;justify-content:space-between}
+.calhead h3{font-size:17px;font-weight:600}
+.navb{background:none;border:0;color:var(--accent);font-size:28px;line-height:1;width:44px;height:44px;border-radius:8px;cursor:pointer}
+.navb:disabled{color:var(--l3);cursor:default}
+.navb:focus-visible{outline:2px solid var(--accent)}
+.wk,.mgrid{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:2px}
+.wk span{text-align:center;font-size:12px;color:var(--l2);padding:2px 0 4px}
+.day{min-height:62px;min-width:0;border-radius:8px;padding:3px 1px;display:flex;flex-direction:column;
+align-items:center;gap:1px;font:inherit;color:inherit;background:none;border:0}
+.day.out{visibility:hidden}
+.day.home{background:var(--fill)}
+.dn{font-size:12px;color:var(--l2);width:22px;height:22px;line-height:22px;border-radius:50%;text-align:center}
+.day.today .dn{background:var(--accent);color:#FFF;font-weight:600}
+.day img{width:24px;height:24px;overflow:hidden;font-size:0}
+.gt,.rs{font-size:11px;white-space:nowrap;font-variant-numeric:tabular-nums}
+.gt{color:var(--l2)}.rs{font-weight:600}
+.rW{color:var(--tg)}.rL{color:var(--tr)}.rOTL{color:var(--to)}
+button.day{cursor:pointer}
+button.day:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+@media (hover:hover){button.day:hover{box-shadow:inset 0 0 0 1.5px var(--l3)}}
+@media (max-width:420px){.ap{display:none}}
+/* Game sheet: centered on desktop, bottom sheet on phone */
+dialog{border:0;padding:0;border-radius:14px;background:var(--card);color:var(--l1);
+width:min(640px,calc(100vw - 32px));max-height:calc(100vh - 64px);overflow:auto;overscroll-behavior:contain}
+dialog::backdrop{background:rgba(0,0,0,.45)}
+.sheet{padding:8px 0 4px}
+.x{display:block;margin:0 8px 0 auto;background:none;border:0;color:var(--accent);font:600 17px/1 inherit;
+font-family:inherit;padding:10px 8px;cursor:pointer;border-radius:8px}
+.x:focus-visible{outline:2px solid var(--accent)}
+.dlghead{display:flex;align-items:center;gap:12px;padding:0 16px 4px}
+@media (max-width:600px){dialog{width:100%;max-width:100%;margin:auto 0 0;border-radius:14px 14px 0 0;max-height:88vh}}
 """
 
 
@@ -459,7 +495,112 @@ def leader_section(title, note, rows, cls=""):
     return f'<section class="{cls}"><h2>{E(title)}</h2><p class="note">{E(note)}</p><div class="group">{body}</div></section>'
 
 
-def render(game, opp, h2h, details, habs_lead, opp_lead, hot_rows, habs_gp):
+def ampm(t):
+    """'7:00 PM' -> '7:00<span class=ap> PM</span>' so phones can hide AM/PM."""
+    hm, ap = t.split(" ")
+    return f'{hm}<span class="ap"> {ap}</span>'
+
+
+def calendar_html(games, details):
+    """Month-view schedule. Past games open a sheet with the game summary."""
+    by_day = {}
+    for g in games:
+        by_day.setdefault(dt.date.fromisoformat(g["gameDate"]), []).append(g)
+    if not by_day:
+        return "", ""
+    months = sorted({(d.year, d.month) for d in by_day})
+    cal = calendar.Calendar(firstweekday=6)          # weeks start on Sunday
+    out, tpls = [], []
+    for y, mo in months:
+        cells = []
+        for d in cal.itermonthdates(y, mo):
+            if d.month != mo:
+                cells.append('<div class="day out" aria-hidden="true"></div>')
+                continue
+            dn = f'<span class="dn">{d.day}</span>'
+            gs = by_day.get(d)
+            if not gs:
+                cells.append(f'<div class="day" data-d="{d.isoformat()}">{dn}</div>')
+                continue
+            g = gs[0]
+            o = opp_side(g)
+            home = g["homeTeam"]["abbrev"] == HABS
+            where = "vs" if home else "at"
+            lg = f'<img src="{E(o.get("logo", ""))}" alt="{E(o["abbrev"])}" loading="lazy">'
+            hcls = " home" if home else ""
+            when = d.strftime("%b %-d")
+            state = g.get("gameScheduleState", "OK")
+            if g["gameState"] in ("OFF", "FINAL"):
+                code, h, sc, extra = result(g)
+                word = {"W": "Win", "L": "Loss", "OTL": "Overtime loss"}[code]
+                label = f"{when}, {where} {o['abbrev']}, {word} {h}–{sc}{(' ' + extra) if extra else ''}"
+                gid = g["id"]
+                cells.append(f'<button class="day has{hcls}" data-d="{d.isoformat()}" data-g="{gid}" '
+                             f'aria-label="{E(label)}">{dn}{lg}<span class="rs r{code}">{code} {h}–{sc}</span></button>')
+                body = (detail_html(details[gid], o["abbrev"]) if gid in details else
+                        '<div class="detail"><p class="meta">Game details are not available.</p></div>')
+                full = dt.date.fromisoformat(g["gameDate"]).strftime("%A, %B %-d, %Y")
+                tpls.append(f'<template id="t{gid}"><div class="dlghead"><span class="pill {code}">{code}</span>'
+                            f'<div class="grow"><div class="name">{where} {E(o["abbrev"])}</div><div class="meta">{full}</div></div>'
+                            f'<span class="score">{h}–{sc}{(" " + extra) if extra else ""}</span></div>{body}</template>')
+            else:
+                if state in ("PPD", "CNCL", "SUSP"):
+                    txt_ = {"PPD": "PPD", "CNCL": "Canc.", "SUSP": "Susp."}[state]
+                elif g["gameState"] in ("LIVE", "CRIT"):
+                    txt_ = "Live"
+                else:
+                    start = dt.datetime.fromisoformat(g["startTimeUTC"].replace("Z", "+00:00")).astimezone(LOCAL_TZ)
+                    txt_ = ampm(start.strftime("%-I:%M %p"))
+                cells.append(f'<div class="day has{hcls}" data-d="{d.isoformat()}" '
+                             f'aria-label="{E(when)}, {where} {E(o["abbrev"])}">{dn}{lg}<span class="gt">{txt_}</span></div>')
+        label = dt.date(y, mo, 1).strftime("%B %Y")
+        out.append(f'<div class="month" data-m="{y}-{mo:02d}" data-label="{label}" hidden>'
+                   f'<div class="mgrid">{"".join(cells)}</div></div>')
+    wk = "".join(f"<span>{c}</span>" for c in "SMTWTFS")
+    html_ = (f'<section class="calsec"><h2>Schedule</h2><p class="note">Times are Eastern. Shaded days are home games. '
+             f'Select a past game to see the summary.</p><div class="cal">'
+             f'<div class="calhead"><button class="navb" id="calPrev" aria-label="Previous month">‹</button>'
+             f'<h3 id="calTitle" aria-live="polite"></h3>'
+             f'<button class="navb" id="calNext" aria-label="Next month">›</button></div>'
+             f'<div class="wk" aria-hidden="true">{wk}</div>{"".join(out)}</div></section>')
+    return html_, "".join(tpls)
+
+
+CAL_JS = """<dialog id="gameDlg" aria-label="Game summary"><div class="sheet">
+<button class="x" id="dlgClose" aria-label="Close">Done</button><div id="dlgBody"></div></div></dialog>
+<script>
+(() => {
+  const months = [...document.querySelectorAll('.month')];
+  if (!months.length) return;
+  const now = new Date(), p = n => String(n).padStart(2, '0');
+  const key = `${now.getFullYear()}-${p(now.getMonth() + 1)}`;
+  let i = months.findIndex(m => m.dataset.m >= key);
+  if (i < 0) i = months.length - 1;
+  const title = document.getElementById('calTitle');
+  const prev = document.getElementById('calPrev'), next = document.getElementById('calNext');
+  const show = () => {
+    months.forEach((m, j) => { m.hidden = j !== i; });
+    title.textContent = months[i].dataset.label;
+    prev.disabled = i === 0; next.disabled = i === months.length - 1;
+  };
+  prev.onclick = () => { if (i > 0) { i--; show(); } };
+  next.onclick = () => { if (i < months.length - 1) { i++; show(); } };
+  document.querySelector(`[data-d="${key}-${p(now.getDate())}"]`)?.classList.add('today');
+  show();
+  const dlg = document.getElementById('gameDlg'), body = document.getElementById('dlgBody');
+  document.querySelectorAll('button.day[data-g]').forEach(b => b.addEventListener('click', () => {
+    const t = document.getElementById('t' + b.dataset.g);
+    if (!t) return;
+    body.replaceChildren(t.content.cloneNode(true));
+    dlg.showModal();
+  }));
+  dlg.addEventListener('click', e => { if (e.target === dlg) dlg.close(); });
+  document.getElementById('dlgClose').onclick = () => dlg.close();
+})();
+</script>"""
+
+
+def render(game, opp, h2h, details, habs_lead, opp_lead, hot_rows, habs_gp, cal=("", "")):
     if game:
         start = dt.datetime.fromisoformat(game["startTimeUTC"].replace("Z", "+00:00")).astimezone(LOCAL_TZ)
         home = game["homeTeam"]["abbrev"] == HABS
@@ -515,7 +656,10 @@ def render(game, opp, h2h, details, habs_lead, opp_lead, hot_rows, habs_gp):
 <header class="hero"><div class="logos">{logo(habs_t)}<span>vs</span>{logo(opp)}</div>
 <div><h1>{E(title)}</h1><p class="sub">{E(sub)}</p></div></header>
 <div class="layout">
+<div class="primary">
 <section class="games"><h2>Last {len(h2h)} meetings</h2><p class="note">{E(h2h_note)}</p><div class="group">{h2h_html}</div></section>
+{cal[0]}
+</div>
 <div class="side">
 <section class="hot"><h2>Hot Habs</h2><p class="note">{E(hot_note)}</p><div class="group">{hot_html}</div></section>
 {leader_section(f"Habs who produce against {opp['abbrev']}", "Active Habs skaters. Career totals vs this opponent, regular season and playoffs, with any team.", habs_lead, "lead1")}
@@ -523,8 +667,8 @@ def render(game, opp, h2h, details, habs_lead, opp_lead, hot_rows, habs_gp):
 </div>
 </div>
 <footer>Data: NHL web API (api-web.nhle.com), the source behind nhl.com. Generated {gen}.
-Skaters only. "Active" means the current NHL roster, so players on injured reserve can be missing.</footer>
-</main></body></html>"""
+Skaters only in the leader lists. "Active" means the current NHL roster, so players on injured reserve can be missing.</footer>
+</main>{cal[1]}{CAL_JS if cal[0] else ""}</body></html>"""
 
 
 # ---------------------------------------------------------------- main
@@ -550,9 +694,13 @@ def main():
     print(f"Season {season}: Habs vs {opp_code}", file=sys.stderr)
 
     h2h = head_to_head(opp_code, season)
+    season_games = [g for g in (get(f"club-schedule-season/{HABS}/now") or {}).get("games", [])
+                    if g["gameType"] in (2, 3)]
     details = {}
     with cf.ThreadPoolExecutor(WORKERS) as ex:
-        futs = {ex.submit(game_detail, g): g["id"] for g in h2h}
+        need = {g["id"]: g for g in h2h}
+        need.update({g["id"]: g for g in season_games if g["gameState"] in ("OFF", "FINAL")})
+        futs = {ex.submit(game_detail, g): gid for gid, g in need.items()}
         for f in cf.as_completed(futs):
             try:
                 details[futs[f]] = f.result()
@@ -562,7 +710,8 @@ def main():
     opp_rows = run_all(skaters(opp_code), {HABS}, season, opp_code)
     habs_gp = max((len(r["last"]) for r in habs_rows), default=0)
 
-    page = render(game, opp, h2h, details, leaders(habs_rows), leaders(opp_rows), hot(habs_rows), habs_gp)
+    page = render(game, opp, h2h, details, leaders(habs_rows), leaders(opp_rows), hot(habs_rows), habs_gp,
+                  calendar_html(season_games, details))
     with open(args.out, "w", encoding="utf-8") as f:
         f.write(page)
     print(f"Wrote {os.path.abspath(args.out)}", file=sys.stderr)
