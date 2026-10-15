@@ -2,7 +2,7 @@ name: Habs game-day dashboard
 
 on:
   schedule:
-    - cron: "0 15 * * *"   # 11:00 EDT / 10:00 EST (GitHub cron is UTC)
+    - cron: "0 13 * * *"   # 9:00 EDT / 8:00 EST (GitHub cron is UTC)
     - cron: "0 21 * * *"   # pre-game refresh, 17:00 EDT / 16:00 EST
   workflow_dispatch:        # "Run workflow" button for manual builds
 
