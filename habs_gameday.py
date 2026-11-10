@@ -20,11 +20,15 @@ import os
 import sys
 import threading
 import time
+import unicodedata
 import urllib.error
 import urllib.request
 from zoneinfo import ZoneInfo
 
 API = "https://api-web.nhle.com/v1"
+# The NHL does not publish injuries. ESPN's public feed is the fallback source.
+ESPN_INJURIES = "https://site.api.espn.com/apis/site/v2/sports/hockey/nhl/injuries"
+INJURY_TTL = 3600
 HABS = "MTL"
 CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".nhl_cache")
 LIVE_TTL = 3 * 3600          # current-season data: refresh after 3 h
@@ -33,6 +37,7 @@ WORKERS = 6                  # keep low; the API rate-limits bursts
 H2H_COUNT = 10
 LEADER_COUNT = 5
 HOT_WINDOW = 5
+RECENT_VS = 5               # recent games shown when a leader row is opened
 HOT_MIN_STREAK = 2           # "hot" if point streak >= this ...
 HOT_MIN_GOALS = 2            # ... or goals in last HOT_WINDOW games >= this
 MAX_LOOKBACK_SEASONS = 15
@@ -45,7 +50,7 @@ _refresh = False
 
 # ---------------------------------------------------------------- data access
 def get(path, ttl=LIVE_TTL):
-    url = f"{API}/{path.lstrip('/')}"
+    url = path if path.startswith("http") else f"{API}/{path.lstrip('/')}"
     fp = os.path.join(CACHE_DIR, hashlib.sha1(url.encode()).hexdigest() + ".json")
     fresh = ttl is None or (time.time() - os.path.getmtime(fp) < ttl if os.path.exists(fp) else False)
     if os.path.exists(fp) and fresh and not (_refresh and ttl is not None):
@@ -197,6 +202,38 @@ def game_detail(g):
             "home": home, "away": away, "shootout": bool(summ.get("shootout"))}
 
 
+def _norm(x):
+    return unicodedata.normalize("NFKD", x or "").encode("ascii", "ignore").decode().lower()
+
+
+def injuries_for(teams):
+    """teams: {abbrev: commonName}. Returns {abbrev: [injury]} or None if the feed fails.
+    ESPN team names are matched on the NHL common name, for example "Canadiens"."""
+    try:
+        data = get(ESPN_INJURIES, INJURY_TTL) or {}
+    except Exception as e:
+        print(f"  injury feed failed: {e}", file=sys.stderr)
+        return None
+    out = {a: [] for a in teams}
+    for t in data.get("injuries", []):
+        tname = _norm(t.get("displayName"))
+        for abbr, common in teams.items():
+            if not common or _norm(common) not in tname:
+                continue
+            for inj in t.get("injuries", []):
+                ath, det = inj.get("athlete") or {}, inj.get("details") or {}
+                out[abbr].append({
+                    "name": ath.get("displayName", ""),
+                    "pos": (ath.get("position") or {}).get("abbreviation", ""),
+                    "headshot": (ath.get("headshot") or {}).get("href", ""),
+                    "status": inj.get("status", ""),
+                    "type": det.get("type") or (inj.get("type") or {}).get("description", ""),
+                    "ret": str(det.get("returnDate") or "")[:10],
+                    "note": inj.get("shortComment") or inj.get("longComment") or "",
+                })
+    return out
+
+
 def analyze(player, vs_set, season):
     """Returns career line vs the opponent set, plus current-season form."""
     pid = player["id"]
@@ -226,6 +263,11 @@ def analyze(player, vs_set, season):
         "a": sum(x.get("assists", 0) for x in vs), "p": sum(x.get("points", 0) for x in vs),
         "streak": streak, "last": [x.get("points", 0) for x in last],
         "lg": sum(x.get("goals", 0) for x in last), "lp": sum(x.get("points", 0) for x in last),
+        "recent": [{"date": x["gameDate"], "team": x.get("teamAbbrev", ""), "opp": x.get("opponentAbbrev", ""),
+                    "home": x.get("homeRoadFlag") == "H", "po": x["_gt"] == 3, "g": x.get("goals", 0),
+                    "a": x.get("assists", 0), "p": x.get("points", 0), "pm": x.get("plusMinus"),
+                    "sog": x.get("shots")}
+                   for x in sorted(vs, key=lambda x: x["gameDate"], reverse=True)[:RECENT_VS]],
     }
 
 
@@ -281,7 +323,7 @@ h1{font-size:34px;line-height:41px;font-weight:700;letter-spacing:.37px}
 /* Phone: one column, calendar first. Desktop: games left, players right. */
 .layout{display:grid;gap:28px}
 .side,.primary{display:contents}
-.calsec{order:1}.hot{order:2}.games{order:3}.lead1{order:4}.lead2{order:5}
+.calsec{order:1}.hot{order:2}.inj{order:3}.games{order:4}.lead1{order:5}.lead2{order:6}
 @media (min-width:900px){
  main{padding:40px 32px 64px}
  .hero{margin-bottom:36px}.logos img{width:80px;height:80px}
@@ -336,6 +378,21 @@ border-top:.5px solid var(--sep);font-size:15px;font-variant-numeric:tabular-num
 .v.hb{background:var(--accent);color:#FFF;font-weight:600}
 .v.ob{background:var(--l1);color:var(--card);font-weight:600}
 footer{color:var(--l2);font-size:12px;margin-top:32px;line-height:1.5}
+/* Injuries */
+.isub{font-size:15px;font-weight:600;color:var(--l2);margin:12px 4px 6px}
+.isub:first-of-type{margin-top:4px}
+.ist{font-size:12px;font-weight:600;border-radius:6px;padding:3px 8px;white-space:nowrap;flex:none}
+.iout{background:var(--red);color:#FFF}.idtd{background:var(--orange);color:#FFF}.ioth{background:var(--fill)}
+.inote{font-size:15px;color:var(--l2);padding:0 16px 12px 68px;line-height:1.35}
+@media (max-width:420px){.inote{padding-left:16px}}
+/* Expandable leader rows. Header and sub-rows leave room for the chevron. */
+.stats.head.lhead{padding-right:36px}
+.pdet{padding:0 36px 10px 68px}
+.phead{display:flex;align-items:flex-end;justify-content:space-between;gap:8px;font-size:13px;color:var(--l2)}
+.phead .stats.head{padding:0}
+.prow{display:flex;align-items:center;gap:12px;min-height:36px;padding:4px 0;border-top:.5px solid var(--sep);font-size:15px}
+.prow:not(.pt) .stats{color:var(--l2)}
+@media (max-width:420px){.pdet{padding-left:16px}}
 /* Calendar. Text colors use the iOS accessible variants for contrast. */
 :root{--tg:#248A3D;--tr:#D70015;--to:#C93400}
 @media (prefers-color-scheme:dark){:root{--tg:#30DB5B;--tr:#FF6961;--to:#FFB340}}
@@ -380,10 +437,39 @@ def logo(t):
             f'<img src="{light}" alt="{E(t["abbrev"])}"></picture>')
 
 
-def player_row(r, right):
+def player_inner(r, right):
     img = f'<img class="shot" src="{E(r["headshot"])}" alt="" loading="lazy">' if r["headshot"] else '<div class="shot"></div>'
-    return (f'<div class="row ph">{img}<div class="grow"><div class="name">{E(r["name"])}</div>'
-            f'<div class="meta">#{E(str(r["num"]))} · {E(r["pos"])}</div></div>{right}</div>')
+    return (f'{img}<div class="grow"><div class="name">{E(r["name"])}</div>'
+            f'<div class="meta">#{E(str(r["num"]))} · {E(r["pos"])}</div></div>{right}')
+
+
+def player_row(r, right):
+    return f'<div class="row ph">{player_inner(r, right)}</div>'
+
+
+def recent_vs_html(r, team_code):
+    """Body of an opened leader row: the player's latest games in this matchup."""
+    if not r.get("recent"):
+        return ""
+    rows = []
+    for x in r["recent"]:
+        d = dt.date.fromisoformat(x["date"]).strftime("%b %-d, %Y")
+        where = "vs" if x["home"] else "at"
+        extra = [f'{where} {E(x["opp"])}']
+        if x["po"]:
+            extra.append("Playoffs")
+        if x["team"] and x["team"] != team_code:
+            extra.append(f'with {E(x["team"])}')
+        sub = f'<div class="meta">{" · ".join(extra)}</div>'
+        pm = "–" if x["pm"] is None else (f'+{x["pm"]}' if x["pm"] > 0 else str(x["pm"]))
+        sog = "–" if x["sog"] is None else x["sog"]
+        cls = " pt" if x["p"] > 0 else ""
+        rows.append(f'<div class="prow{cls}"><div class="grow"><div>{d}</div>{sub}</div>'
+                    f'<div class="stats"><span>{sog}</span><span>{x["g"]}</span><span>{x["a"]}</span><b>{x["p"]}</b></div></div>')
+    head = '<div class="stats head"><span>SOG</span><span>G</span><span>A</span><span>P</span></div>'
+    n = len(r["recent"])
+    title = "Last game" if n == 1 else f"Last {n} games"
+    return f'<div class="pdet"><div class="phead"><span>{title}</span>{head}</div>{"".join(rows)}</div>'
 
 
 # (category, label, +1 = higher is better, -1 = lower is better)
@@ -485,13 +571,66 @@ CHEVRON = ('<svg class="chev" viewBox="0 0 8 13" aria-hidden="true"><path d="M1.
            'fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>')
 
 
-def leader_section(title, note, rows, cls=""):
+def _status(st):
+    s_ = st.lower()
+    if "reserve" in s_:
+        return "IR", "iout"
+    if "out" in s_ or "suspen" in s_:
+        return st.title(), "iout"
+    if "day" in s_:
+        return "Day-to-day", "idtd"
+    return st or "Listed", "ioth"
+
+
+def injury_list(lst):
+    if lst is None:
+        return '<div class="empty">Injury data is not available right now.</div>'
+    if not lst:
+        return '<div class="empty">No injuries reported.</div>'
+    rank = {"iout": 0, "idtd": 1, "ioth": 2}
+    items = []
+    for i in sorted(lst, key=lambda i: (rank[_status(i["status"])[1]], i["name"])):
+        label, cls = _status(i["status"])
+        bits = [i["pos"], i["type"]]
+        try:
+            bits.append("Est. return " + dt.date.fromisoformat(i["ret"]).strftime("%b %-d"))
+        except ValueError:
+            pass
+        meta = " · ".join(E(b) for b in bits if b)
+        img = (f'<img class="shot" src="{E(i["headshot"])}" alt="" loading="lazy">' if i["headshot"]
+               else '<div class="shot"></div>')
+        inner = (f'{img}<div class="grow"><div class="name">{E(i["name"])}</div><div class="meta">{meta}</div></div>'
+                 f'<span class="ist {cls}">{E(label)}</span>')
+        if i["note"]:
+            items.append(f'<details class="ph"><summary class="row">{inner}{CHEVRON}</summary>'
+                         f'<p class="inote">{E(i["note"])}</p></details>')
+        else:
+            items.append(f'<div class="row ph">{inner}<span class="chev" aria-hidden="true"></span></div>')
+    return "".join(items)
+
+
+def injury_section(inj, opp):
+    habs = injury_list(None if inj is None else inj.get(HABS))
+    oppl = injury_list(None if inj is None else inj.get(opp["abbrev"]))
+    oname = (opp.get("commonName") or {}).get("default") or opp["abbrev"]
+    return (f'<section class="inj"><h2>Injuries</h2><p class="note">Source: ESPN injury report. '
+            f'The NHL does not publish one. Select a player to see the latest note.</p>'
+            f'<h3 class="isub">Canadiens</h3><div class="group">{habs}</div>'
+            f'<h3 class="isub">{E(oname)}</h3><div class="group">{oppl}</div></section>')
+
+
+def leader_section(title, note, rows, cls="", team_code=""):
     if not rows:
         body = '<div class="empty">No points recorded in this matchup.</div>'
     else:
-        head = '<div class="stats head"><span>GP</span><span>G</span><span>A</span><span>P</span></div>'
-        body = head + "".join(player_row(r, f'<div class="stats"><span>{r["gp"]}</span><span>{r["g"]}</span>'
-                                            f'<span>{r["a"]}</span><b>{r["p"]}</b></div>') for r in rows)
+        head = '<div class="stats head lhead"><span>GP</span><span>G</span><span>A</span><span>P</span></div>'
+        items = []
+        for r in rows:
+            right = (f'<div class="stats"><span>{r["gp"]}</span><span>{r["g"]}</span>'
+                     f'<span>{r["a"]}</span><b>{r["p"]}</b></div>{CHEVRON}')
+            items.append(f'<details class="ph"><summary class="row">{player_inner(r, right)}</summary>'
+                         f'{recent_vs_html(r, team_code)}</details>')
+        body = head + "".join(items)
     return f'<section class="{cls}"><h2>{E(title)}</h2><p class="note">{E(note)}</p><div class="group">{body}</div></section>'
 
 
@@ -600,7 +739,7 @@ CAL_JS = """<dialog id="gameDlg" aria-label="Game summary"><div class="sheet">
 </script>"""
 
 
-def render(game, opp, h2h, details, habs_lead, opp_lead, hot_rows, habs_gp, cal=("", "")):
+def render(game, opp, h2h, details, habs_lead, opp_lead, hot_rows, habs_gp, cal=("", ""), inj_html=""):
     if game:
         start = dt.datetime.fromisoformat(game["startTimeUTC"].replace("Z", "+00:00")).astimezone(LOCAL_TZ)
         home = game["homeTeam"]["abbrev"] == HABS
@@ -662,11 +801,12 @@ def render(game, opp, h2h, details, habs_lead, opp_lead, hot_rows, habs_gp, cal=
 </div>
 <div class="side">
 <section class="hot"><h2>Hot Habs</h2><p class="note">{E(hot_note)}</p><div class="group">{hot_html}</div></section>
-{leader_section(f"Habs who produce against {opp['abbrev']}", "Active Habs skaters. Career totals vs this opponent, regular season and playoffs, with any team.", habs_lead, "lead1")}
-{leader_section(f"{opp['abbrev']} players who produce against the Habs", "Active opponent skaters. Career totals vs Montreal, regular season and playoffs, with any team.", opp_lead, "lead2")}
+{inj_html}
+{leader_section(f"Habs who produce against {opp['abbrev']}", "Active Habs skaters. Career totals vs this opponent, regular season and playoffs, with any team. Select a player to see recent games.", habs_lead, "lead1", HABS)}
+{leader_section(f"{opp['abbrev']} players who produce against the Habs", "Active opponent skaters. Career totals vs Montreal, regular season and playoffs, with any team. Select a player to see recent games.", opp_lead, "lead2", opp["abbrev"])}
 </div>
 </div>
-<footer>Data: NHL web API (api-web.nhle.com), the source behind nhl.com. Generated {gen}.
+<footer>Data: NHL web API (api-web.nhle.com), the source behind nhl.com. Injuries: ESPN. Generated {gen}.
 Skaters only in the leader lists. "Active" means the current NHL roster, so players on injured reserve can be missing.</footer>
 </main>{cal[1]}{CAL_JS if cal[0] else ""}</body></html>"""
 
@@ -710,8 +850,10 @@ def main():
     opp_rows = run_all(skaters(opp_code), {HABS}, season, opp_code)
     habs_gp = max((len(r["last"]) for r in habs_rows), default=0)
 
+    opp_common = (opp.get("commonName") or {}).get("default", "")
+    inj = injuries_for({HABS: "Canadiens", opp_code: opp_common})
     page = render(game, opp, h2h, details, leaders(habs_rows), leaders(opp_rows), hot(habs_rows), habs_gp,
-                  calendar_html(season_games, details))
+                  calendar_html(season_games, details), injury_section(inj, opp))
     with open(args.out, "w", encoding="utf-8") as f:
         f.write(page)
     print(f"Wrote {os.path.abspath(args.out)}", file=sys.stderr)
